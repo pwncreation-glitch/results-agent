@@ -37,11 +37,17 @@ sess.headers.update(UA)
 # ---------- BSE ----------
 def fetch_bse(cat, d_from, d_to):
     rows, page = [], 1
+    try:
+        sess.get("https://www.bseindia.com/corporates/ann.html", timeout=30)  # pick up cookies
+    except Exception as e:
+        print("BSE warm-up error:", e)
     while page <= 10:
         params = dict(strCat=cat, strPrevDate=d_from, strScrip="", strSearch="P",
                       strToDate=d_to, strType="C", pageno=page)
         try:
             r = sess.get(BSE_API, params=params, timeout=30)
+            if r.status_code != 200 or not r.text.strip().startswith("{"):
+                print("BSE bad response:", r.status_code, r.text[:200]); break
             data = r.json().get("Table", [])
         except Exception as e:
             print("BSE fetch error:", e); break
