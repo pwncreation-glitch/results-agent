@@ -10,7 +10,11 @@ Usage:
   python agent.py run --loop            # keep checking every 10 min
 """
 import os, sys, time, sqlite3, argparse, datetime as dt
-import requests, fitz  # fitz = PyMuPDF
+import requests
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
 from bs4 import BeautifulSoup
 
 # ---------- config (set as environment variables) ----------
@@ -18,13 +22,16 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")  # check AI Studio for current free models
-WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.strip()]  # BSE scrip codes, e.g. 500325,532540. Empty = all
+WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.strip()]  # BSE scrip codes, empty = all
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "15"))  # protects free-tier limits
-SLEEP_BETWEEN = 8  # seconds between LLM calls (free tier is rate limited)
+SLEEP_BETWEEN = 8  # seconds between LLM calls
 MAX_CHARS = 60000  # PDF text sent to the LLM
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-      "Referer": "https://www.bseindia.com/", "Origin": "https://www.bseindia.com"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": "https://www.bseindia.com/",
+      "Origin": "https://www.bseindia.com"}
 BSE_API = "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
 PDF_URLS = ["https://www.bseindia.com/xml-data/corpfiling/AttachLive/{}",
             "https://www.bseindia.com/xml-data/corpfiling/AttachHis/{}"]
@@ -33,21 +40,32 @@ db = sqlite3.connect("seen.db")
 db.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
 sess = requests.Session()
 sess.headers.update(UA)
+_warmed = False
 
 # ---------- BSE ----------
+def warm_up():
+    """Visit the BSE site once to pick up cookies before calling the API."""
+    global _warmed
+    if _warmed: return
+    _warmed = True
+    for url in ("https://www.bseindia.com/", "https://www.bseindia.com/corporates/ann.html"):
+        try:
+            r = sess.get(url, timeout=30)
+            print("BSE warm-up:", url, r.status_code)
+        except Exception as e:
+            print("BSE warm-up error:", url, e)
+
 def fetch_bse(cat, d_from, d_to):
+    warm_up()
     rows, page = [], 1
-    try:
-        sess.get("https://www.bseindia.com/corporates/ann.html", timeout=30)  # pick up cookies
-    except Exception as e:
-        print("BSE warm-up error:", e)
     while page <= 10:
         params = dict(strCat=cat, strPrevDate=d_from, strScrip="", strSearch="P",
                       strToDate=d_to, strType="C", pageno=page)
         try:
             r = sess.get(BSE_API, params=params, timeout=30)
             if r.status_code != 200 or not r.text.strip().startswith("{"):
-                print("BSE bad response:", r.status_code, r.text[:200]); break
+                print(f"BSE bad response [{cat} page {page}]:", r.status_code, r.text[:200].replace("\n", " "))
+                break
             data = r.json().get("Table", [])
         except Exception as e:
             print("BSE fetch error:", e); break
@@ -55,6 +73,7 @@ def fetch_bse(cat, d_from, d_to):
         rows += data
         if len(data) < 50: break
         page += 1
+    print(f"BSE {cat}: {len(rows)} rows")
     return rows
 
 def classify(row):
@@ -194,10 +213,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if not (TG_TOKEN and TG_CHAT and GEMINI_KEY):
         sys.exit("Set TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY first.")
-    if a.mode == "backfill":
-        run_once(a.days)
-    else:
-        while True:
-            run_once(1)
-            if not a.loop: break
-            time.sleep(600)
+    days = a.days if a.mode == "backfill" else 1
+    while True:
+        run_once(days)
+        if not a.loop: break
+        time.sleep(600)
