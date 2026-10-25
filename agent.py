@@ -55,26 +55,46 @@ def warm_up():
         except Exception as e:
             print("BSE warm-up error:", url, e)
 
+ENDPOINTS = ["https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w",
+             "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"]
+_good_endpoint = None
+
+def _query(endpoint, cat, d_from, d_to, page):
+    params = dict(pageno=page, strCat=cat, strPrevDate=d_from, strScrip="",
+                  strSearch="P", strToDate=d_to, strType="C")
+    if "SubCategory" in endpoint:
+        params["subcategory"] = "-1"
+    try:
+        r = sess.get(endpoint, params=params, timeout=30)
+        if r.status_code != 200 or not r.text.strip().startswith("{"):
+            print(f"  {endpoint.split('/')[-2]} [{cat} p{page}] ->", r.status_code, r.text[:120].replace("\n", " "))
+            return None
+        return r.json().get("Table", []) or []
+    except Exception as e:
+        print("  BSE fetch error:", e)
+        return None
+
 def fetch_bse(cat, d_from, d_to):
+    """Try the BSE endpoints; stick with whichever returns data."""
+    global _good_endpoint
     warm_up()
-    rows, page = [], 1
-    while page <= 10:
-        params = dict(strCat=cat, strPrevDate=d_from, strScrip="", strSearch="P",
-                      strToDate=d_to, strType="C", pageno=page)
-        try:
-            r = sess.get(BSE_API, params=params, timeout=30)
-            if r.status_code != 200 or not r.text.strip().startswith("{"):
-                print(f"BSE bad response [{cat} page {page}]:", r.status_code, r.text[:200].replace("\n", " "))
-                break
-            data = r.json().get("Table", [])
-        except Exception as e:
-            print("BSE fetch error:", e); break
-        if not data: break
-        rows += data
-        if len(data) < 50: break
-        page += 1
-    print(f"BSE {cat}: {len(rows)} rows")
-    return rows
+    order = ([_good_endpoint] if _good_endpoint else []) + [e for e in ENDPOINTS if e != _good_endpoint]
+    for ep in order:
+        first = _query(ep, cat, d_from, d_to, 1)
+        if not first:
+            continue
+        _good_endpoint = ep
+        rows, page, data = list(first), 1, first
+        while len(data) >= 50 and page < 10:
+            page += 1
+            data = _query(ep, cat, d_from, d_to, page) or []
+            rows += data
+        print(f"BSE {cat}: {len(rows)} rows via {ep.split('/')[-2]} ({d_from}-{d_to})")
+        if rows:
+            print("  sample fields:", {k: str(v)[:40] for k, v in list(rows[0].items())[:8]})
+        return rows
+    print(f"BSE {cat}: 0 rows from all endpoints ({d_from}-{d_to})")
+    return []
 
 def classify(row):
     text = f"{row.get('HEADLINE','')} {row.get('SUBCATNAME','')} {row.get('NEWSSUB','')}".lower()
@@ -213,7 +233,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if not (TG_TOKEN and TG_CHAT and GEMINI_KEY):
         sys.exit("Set TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY first.")
-    days = a.days if a.mode == "backfill" else 1
+    days = a.days if a.mode == "backfill" else 2
     while True:
         run_once(days)
         if not a.loop: break
