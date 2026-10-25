@@ -157,16 +157,18 @@ def screener_quarters(scrip_code):
 class QuotaError(Exception):
     pass
 
-_model = None
+_models = None
+_bad = set()
+_PREFER = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]
 _SKIP = ("image", "tts", "live", "audio", "exp", "thinking", "embedding", "vision",
          "robotics", "computer", "native", "learnlm", "gemma")
 
-def pick_model():
-    """Use GEMINI_MODEL if set, otherwise ask Google which Flash models this key can use."""
-    global _model
-    if _model: return _model
+def candidate_models():
+    """Ordered list of models to try: GEMINI_MODEL if set, else known free-tier Flash models first."""
+    global _models
+    if _models is not None: return _models
     if GEMINI_MODEL:
-        _model = GEMINI_MODEL
+        _models = [GEMINI_MODEL]
     else:
         r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
                          params={"key": GEMINI_KEY, "pageSize": 200}, timeout=30)
@@ -176,29 +178,33 @@ def pick_model():
                  if "generateContent" in m.get("supportedGenerationMethods", [])
                  and "flash" in m["name"] and not any(x in m["name"] for x in _SKIP)]
         print("Gemini Flash models available:", names)
-        pool = [n for n in names if "preview" not in n] or names
-        pool = [n for n in pool if "lite" not in n] or pool
-        if not pool:
+        rest = sorted((n for n in names if n not in _PREFER and "preview" not in n and "omni" not in n), reverse=True)
+        _models = [n for n in _PREFER if n in names] + rest
+        if not _models:
             raise RuntimeError("No Gemini Flash model available for this API key")
-        _model = sorted(pool, reverse=True)[0]
-    print("Using Gemini model:", _model)
-    return _model
+    print("Gemini models, in order of use:", _models[:6])
+    return _models
 
 def llm(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{pick_model()}:generateContent"
-    for i in range(4):
-        r = requests.post(url, params={"key": GEMINI_KEY}, timeout=180,
-                          json={"contents": [{"parts": [{"text": prompt}]}]})
-        if r.status_code == 429:
-            print("Gemini rate limit:", r.text[:200].replace("\n", " "))
-            if i == 2:
-                raise QuotaError("Gemini quota/rate limit not clearing")
-            time.sleep(25); continue
-        if r.status_code >= 400:
-            print("Gemini error:", r.status_code, r.text[:300].replace("\n", " "))
-        r.raise_for_status()
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raise QuotaError("Gemini quota/rate limit not clearing")
+    for model in candidate_models():
+        if model in _bad: continue
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(2):
+            r = requests.post(url, params={"key": GEMINI_KEY}, timeout=150,
+                              json={"contents": [{"parts": [{"text": prompt}]}]})
+            if r.status_code == 429:
+                print(f"Gemini {model}: quota/rate limit -", r.text[:160].replace("\n", " "))
+                if attempt == 0:
+                    time.sleep(20); continue
+                _bad.add(model); print(f"  skipping {model} for this run"); break
+            if r.status_code in (403, 404):
+                print(f"Gemini {model}: unavailable ({r.status_code})"); _bad.add(model); break
+            if r.status_code >= 400:
+                print("Gemini error:", r.status_code, r.text[:300].replace("\n", " "))
+            r.raise_for_status()
+            print(f"   analysed with {model}")
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raise QuotaError("All Gemini models are out of quota or unavailable")
 
 PROMPTS = {
  "result": """You are an equity research analyst. Analyse this Indian company's quarterly results filing.
