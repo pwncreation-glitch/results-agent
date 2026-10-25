@@ -12,6 +12,10 @@ Usage:
 import os, sys, time, sqlite3, argparse, datetime as dt
 import requests
 try:
+    sys.stdout.reconfigure(line_buffering=True)  # show logs live in GitHub Actions
+except Exception:
+    pass
+try:
     import pymupdf as fitz
 except ImportError:
     import fitz
@@ -26,6 +30,7 @@ WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "15"))  # protects free-tier limits
 SLEEP_BETWEEN = 8  # seconds between LLM calls
 MAX_CHARS = 60000  # PDF text sent to the LLM
+RUN_BUDGET = int(os.environ.get("RUN_BUDGET_SECONDS", "540"))  # stop starting new filings after this many seconds
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       "Accept": "application/json, text/plain, */*",
@@ -149,6 +154,9 @@ def screener_quarters(scrip_code):
         return ""
 
 # ---------- LLM ----------
+class QuotaError(Exception):
+    pass
+
 _model = None
 _SKIP = ("image", "tts", "live", "audio", "exp", "thinking", "embedding", "vision",
          "robotics", "computer", "native", "learnlm", "gemma")
@@ -182,13 +190,15 @@ def llm(prompt):
         r = requests.post(url, params={"key": GEMINI_KEY}, timeout=180,
                           json={"contents": [{"parts": [{"text": prompt}]}]})
         if r.status_code == 429:
-            print("Gemini rate limit, waiting...", r.text[:150].replace("\n", " "))
-            time.sleep(30 * (i + 1)); continue
+            print("Gemini rate limit:", r.text[:200].replace("\n", " "))
+            if i == 2:
+                raise QuotaError("Gemini quota/rate limit not clearing")
+            time.sleep(25); continue
         if r.status_code >= 400:
             print("Gemini error:", r.status_code, r.text[:300].replace("\n", " "))
         r.raise_for_status()
         return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raise RuntimeError("LLM rate limit not clearing")
+    raise QuotaError("Gemini quota/rate limit not clearing")
 
 PROMPTS = {
  "result": """You are an equity research analyst. Analyse this Indian company's quarterly results filing.
@@ -245,15 +255,28 @@ def process(row):
     return True
 
 def run_once(days):
+    start = time.time()
     items = get_new_items(days)
     print(f"{len(items)} new filings; processing up to {MAX_PER_RUN}")
+    done = 0
     for row in items[:MAX_PER_RUN]:
+        if time.time() - start > RUN_BUDGET:
+            print("Time budget reached; remaining filings will be picked up next run.")
+            break
+        name = row.get("SLONGNAME")
+        print(f"-> {row['_kind']}: {name}")
         try:
             if process(row):
                 db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (str(row["NEWSID"]),)); db.commit()
+                done += 1
+                print("   sent to Telegram")
+        except QuotaError as e:
+            print("Stopping this run:", e, "- will retry on the next run.")
+            break
         except Exception as e:
-            print("failed:", row.get("SLONGNAME"), e)
+            print("failed:", name, e)
         time.sleep(SLEEP_BETWEEN)
+    print(f"Done: {done} sent this run.")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
