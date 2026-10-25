@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")  # check AI Studio for current free models
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # leave empty = auto-pick a current Flash model
 WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.strip()]  # BSE scrip codes, empty = all
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "15"))  # protects free-tier limits
 SLEEP_BETWEEN = 8  # seconds between LLM calls
@@ -149,13 +149,43 @@ def screener_quarters(scrip_code):
         return ""
 
 # ---------- LLM ----------
+_model = None
+_SKIP = ("image", "tts", "live", "audio", "exp", "thinking", "embedding", "vision",
+         "robotics", "computer", "native", "learnlm", "gemma")
+
+def pick_model():
+    """Use GEMINI_MODEL if set, otherwise ask Google which Flash models this key can use."""
+    global _model
+    if _model: return _model
+    if GEMINI_MODEL:
+        _model = GEMINI_MODEL
+    else:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"key": GEMINI_KEY, "pageSize": 200}, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Cannot list Gemini models: {r.status_code} {r.text[:200]}")
+        names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])
+                 and "flash" in m["name"] and not any(x in m["name"] for x in _SKIP)]
+        print("Gemini Flash models available:", names)
+        pool = [n for n in names if "preview" not in n] or names
+        pool = [n for n in pool if "lite" not in n] or pool
+        if not pool:
+            raise RuntimeError("No Gemini Flash model available for this API key")
+        _model = sorted(pool, reverse=True)[0]
+    print("Using Gemini model:", _model)
+    return _model
+
 def llm(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{pick_model()}:generateContent"
     for i in range(4):
         r = requests.post(url, params={"key": GEMINI_KEY}, timeout=180,
                           json={"contents": [{"parts": [{"text": prompt}]}]})
         if r.status_code == 429:
+            print("Gemini rate limit, waiting...", r.text[:150].replace("\n", " "))
             time.sleep(30 * (i + 1)); continue
+        if r.status_code >= 400:
+            print("Gemini error:", r.status_code, r.text[:300].replace("\n", " "))
         r.raise_for_status()
         return r.json()["candidates"][0]["content"]["parts"][0]["text"]
     raise RuntimeError("LLM rate limit not clearing")
