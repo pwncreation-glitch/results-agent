@@ -226,12 +226,13 @@ PROMPT_RESULT_JSON = """You are extracting data from an Indian company's quarter
 - "quarter_label": quarter the results are for, Indian financial year Apr-Mar, like "Q2 FY27"
 - "periods": three labels [current quarter, previous quarter, same quarter last year], like ["Sep 2026","Jun 2026","Sep 2025"]
 - "basis": "Consolidated" or "Standalone" (prefer consolidated)
+- "unit": the unit used for amounts in the results table: "crore", "lakh", "million", "thousand" or "rupees"
 - "sales_label": "Revenue" (use "Total income" or "NII" for banks, NBFCs, insurers)
 - "ebitda_label": "EBITDA" (use "PPOP" for banks/NBFCs) or null if not applicable
 - "sales", "ebitda", "pat", "eps": each a list of three numbers [current, previous quarter, same quarter last year]. pat = net profit after tax (attributable to owners if shown)
 - "highlights": up to 3 short factual points (segments, order book, volumes, launches, capex, dividends), each under 110 characters
 - "watch": one short factual line on one-offs, exceptional items, high other income, auditor remarks or other flags, or "" if none
-Rules: all amounts in Rs crore (1 crore = 100 lakh = 10 million), converting if the filing uses lakh or million; EPS in Rs. Use null for any number you cannot find; you may use the screener history below to fill missing previous periods. Losses are negative numbers. Facts only: no opinions, ratings or recommendations."""
+Rules: copy "sales", "ebitda" and "pat" EXACTLY as printed in the results table, in that table's own unit, with every decimal digit kept: do NOT round, do NOT convert units, no thousands separators. EPS in Rs as printed. If EBITDA is not stated, compute it as profit before tax + finance costs + depreciation - other income. Use null for any number missing from the filing; only if a whole period is missing from the filing may you take it from the screener history below (those values are in Rs crore, so convert them into the filing's unit first). Losses are negative numbers. Facts only: no opinions, ratings or recommendations."""
 
 PROMPT_TEXT = {
  "result": """You are an equity research analyst. Summarise this Indian company's quarterly results filing.
@@ -279,7 +280,7 @@ def fmt(x, eps=False):
     if x is None: return "–"
     if eps: return f"{x:,.2f}"
     a = abs(x)
-    return f"{x:,.0f}" if a >= 1000 else (f"{x:,.1f}" if a >= 10 else f"{x:,.2f}")
+    return f"{x:,.0f}" if a >= 100 else (f"{x:,.1f}" if a >= 10 else f"{x:,.2f}")
 
 def chg(cur, base):
     """-> (text, direction) direction: 1 good, -1 bad, 0 neutral"""
@@ -311,8 +312,19 @@ def make_tag(name):
     n = re.sub(r"[^A-Za-z0-9 ]", " ", display_name(name))
     return "#" + "".join(w.capitalize() if w.islower() or w.isupper() else w for w in n.split())[:28]
 
+def unit_factor(u):
+    """Multiplier that converts the filing's unit into Rs crore."""
+    u = str(u or "").lower()
+    if "lakh" in u or "lac" in u: return 0.01
+    if "million" in u: return 0.1
+    if "thousand" in u: return 0.0001
+    if "rupee" in u or u in ("inr", "rs"): return 1e-7
+    return 1.0  # crore or unknown
+
 def build_rows(d):
-    sales, ebitda, pat, eps = (vec(d, k) for k in ("sales", "ebitda", "pat", "eps"))
+    f = unit_factor(d.get("unit"))
+    sales, ebitda, pat = ([None if x is None else x * f for x in vec(d, k)] for k in ("sales", "ebitda", "pat"))
+    eps = vec(d, "eps")
     rows = []
     def add(label, v, is_eps=False):
         if all(x is None for x in v): return
