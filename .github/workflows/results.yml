@@ -1,0 +1,51 @@
+name: results-agent
+
+on:
+  schedule:
+    # every 15 min, 03:00-17:59 UTC = 08:30-23:30 IST (results season hours)
+    - cron: "*/15 3-17 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run or backfill"
+        default: "run"
+      days:
+        description: "days to look back (backfill)"
+        default: "7"
+
+permissions:
+  contents: write   # needed to save seen.db back to the repo
+
+concurrency:
+  group: results-agent
+  cancel-in-progress: false
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run agent
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WATCHLIST: ${{ vars.WATCHLIST }}
+        run: python agent.py ${{ github.event.inputs.mode || 'run' }} --days ${{ github.event.inputs.days || '7' }}
+
+      - name: Save seen.db (so nothing is sent twice)
+        if: always()
+        run: |
+          git config user.name "results-bot"
+          git config user.email "results-bot@users.noreply.github.com"
+          git add seen.db || true
+          git diff --cached --quiet || (git commit -m "update seen filings" && git pull --rebase && git push)
