@@ -33,7 +33,21 @@ TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # leave empty = auto-pick a current Flash model
 WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.strip()]  # BSE scrip codes, empty = all
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "15"))  # protects free-tier limits
+def envnum(name, default):
+    v = os.environ.get(name, "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+MAX_PER_RUN = int(envnum("MAX_PER_RUN", 25))  # filings analysed per run (protects free-tier limits)
+# Quality filter: only results meeting ALL four thresholds are posted
+FILTER_ON = os.environ.get("FILTER_ON", "1").strip() != "0"           # set FILTER_ON=0 to post every result
+MIN_REV_YOY = envnum("MIN_REV_YOY", 50)    # revenue growth % vs same quarter last year
+MIN_REV_QOQ = envnum("MIN_REV_QOQ", 50)    # revenue growth % vs previous quarter
+MIN_PAT_YOY = envnum("MIN_PAT_YOY", 40)    # net profit growth % vs same quarter last year
+MIN_PAT_QOQ = envnum("MIN_PAT_QOQ", 40)    # net profit growth % vs previous quarter
+ALLOW_TURNAROUND = os.environ.get("ALLOW_TURNAROUND", "1").strip() != "0"  # loss -> profit counts as passing
 SLEEP_BETWEEN = 8  # seconds between LLM calls
 MAX_CHARS = 60000  # PDF text sent to the LLM
 RUN_BUDGET = int(os.environ.get("RUN_BUDGET_SECONDS", "540"))  # stop starting new filings after this many seconds
@@ -49,6 +63,7 @@ PDF_URLS = ["https://www.bseindia.com/xml-data/corpfiling/AttachLive/{}",
 
 db = sqlite3.connect("seen.db")
 db.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
+db.execute("CREATE TABLE IF NOT EXISTS qualified (scrip TEXT PRIMARY KEY, name TEXT, day TEXT)")
 sess = requests.Session()
 sess.headers.update(UA)
 _warmed = False
@@ -436,6 +451,34 @@ def result_caption(name, d, mg, series, url, full=True):
           f"#Result #{re.sub(r'[^A-Za-z0-9]', '', q)}"]
     return "\n".join(L)
 
+# ---------- quality filter ----------
+def growth(cur, base, allow_turnaround=False):
+    if cur is None or base is None: return None
+    if base > 0: return (cur / base - 1) * 100
+    if allow_turnaround and cur > 0: return float("inf")   # loss/zero -> profit
+    return None
+
+def _g(g):
+    if g is None: return "n/a"
+    return "turnaround" if g == float("inf") else f"{g:+.0f}%"
+
+def passes_filter(sales, pat):
+    checks = [("Rev YoY", growth(sales[0], sales[2]), MIN_REV_YOY),
+              ("Rev QoQ", growth(sales[0], sales[1]), MIN_REV_QOQ),
+              ("PAT YoY", growth(pat[0], pat[2], ALLOW_TURNAROUND), MIN_PAT_YOY),
+              ("PAT QoQ", growth(pat[0], pat[1], ALLOW_TURNAROUND), MIN_PAT_QOQ)]
+    desc = ", ".join(f"{n} {_g(g)}" for n, g, _ in checks)
+    ok = all(g is not None and g >= m for _, g, m in checks)
+    return ok, desc
+
+def mark_qualified(row):
+    db.execute("INSERT OR REPLACE INTO qualified VALUES (?,?,?)",
+               (str(row.get("SCRIP_CD")), row.get("SLONGNAME"), dt.date.today().isoformat()))
+    db.commit()
+
+def is_qualified(scrip):
+    return db.execute("SELECT 1 FROM qualified WHERE scrip=?", (str(scrip),)).fetchone() is not None
+
 # ---------- Telegram ----------
 def send_tg(text, html_mode=True):
     for i in range(0, len(text), 4000):
@@ -457,6 +500,13 @@ def send_result(row, d, url):
     rows, mg, series = build_rows(d)
     if not rows or (series[0][0] is None and series[2][0] is None):
         raise ValueError("no usable numbers extracted")
+    if FILTER_ON:
+        ok, desc = passes_filter(series[0], series[2])
+        if not ok:
+            print(f"   filtered out: {desc}")
+            return "skip"
+        print(f"   QUALIFIED: {desc}")
+        mark_qualified(row)
     caption = result_caption(name, d, mg, series, url)
     png = None
     if PIL_OK:
@@ -473,6 +523,7 @@ def send_result(row, d, url):
         send_tg(caption)
     else:
         send_tg(caption)
+    return True
 
 # ---------- pipeline ----------
 def process(row):
@@ -492,12 +543,17 @@ def process(row):
             raise
         except Exception as e:
             print("   structured extraction failed:", e)
+        if d is None and FILTER_ON:
+            print("   cannot verify growth numbers - skipped")
+            return "skip"
         if d is not None:
             try:
-                send_result(row, d, url)
-                return True
+                return send_result(row, d, url)
             except ValueError as e:
-                print("   ", e, "- using text summary")
+                print("   ", e)
+                if FILTER_ON:
+                    return "skip"
+                print("   using text summary")
         analysis = llm(PROMPT_TEXT["result"] + ctx + extra)
         head, tags = f"📊 <b>{esc(make_tag(name))} RESULTS</b>", "#Result"
     else:
@@ -514,8 +570,10 @@ def process(row):
 def run_once(days):
     start = time.time()
     items = get_new_items(days)
-    print(f"{len(items)} new filings; processing up to {MAX_PER_RUN}")
-    done = 0
+    if FILTER_ON:   # presentations/concalls only for companies whose result passed the filter
+        items = [r for r in items if r["_kind"] == "result" or is_qualified(r.get("SCRIP_CD"))]
+    print(f"{len(items)} filings to check; analysing up to {MAX_PER_RUN}")
+    done = skipped = 0
     for row in items[:MAX_PER_RUN]:
         if time.time() - start > RUN_BUDGET:
             print("Time budget reached; remaining filings will be picked up next run.")
@@ -523,17 +581,21 @@ def run_once(days):
         name = row.get("SLONGNAME")
         print(f"-> {row['_kind']}: {name}")
         try:
-            if process(row):
+            res = process(row)
+            if res:
                 db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (str(row["NEWSID"]),)); db.commit()
-                done += 1
-                print("   sent to Telegram")
+                if res == "skip":
+                    skipped += 1
+                else:
+                    done += 1
+                    print("   sent to Telegram")
         except QuotaError as e:
             print("Stopping this run:", e, "- will retry on the next run.")
             break
         except Exception as e:
             print("failed:", name, e)
         time.sleep(SLEEP_BETWEEN)
-    print(f"Done: {done} sent this run.")
+    print(f"Done: {done} posted, {skipped} filtered out this run.")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
