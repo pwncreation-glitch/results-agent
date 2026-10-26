@@ -40,6 +40,13 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WATCHLIST: ${{ vars.WATCHLIST }}
+          FILTER_ON: ${{ vars.FILTER_ON }}
+          MIN_REV_YOY: ${{ vars.MIN_REV_YOY }}
+          MIN_REV_QOQ: ${{ vars.MIN_REV_QOQ }}
+          MIN_PAT_YOY: ${{ vars.MIN_PAT_YOY }}
+          MIN_PAT_QOQ: ${{ vars.MIN_PAT_QOQ }}
+          ALLOW_TURNAROUND: ${{ vars.ALLOW_TURNAROUND }}
+          MAX_PER_RUN: ${{ vars.MAX_PER_RUN }}
         run: python agent.py ${{ github.event.inputs.mode || 'run' }} --days ${{ github.event.inputs.days || '7' }}
 
       - name: Save seen.db (so nothing is sent twice)
