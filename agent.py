@@ -41,8 +41,14 @@ def envnum(name, default):
         return default
 
 MAX_PER_RUN = int(envnum("MAX_PER_RUN", 25))  # filings analysed per run (protects free-tier limits)
-# Quality filter: only results meeting ALL four thresholds are posted
+
+# Quality filter
 FILTER_ON = os.environ.get("FILTER_ON", "1").strip() != "0"           # set FILTER_ON=0 to post every result
+# FILTER_MODE decides how the four thresholds below are combined:
+#   yoy    = revenue YoY >= MIN_REV_YOY  AND  net profit YoY >= MIN_PAT_YOY   (QoQ ignored)  <- default
+#   either = (revenue YoY OR QoQ passes)  AND  (net profit YoY OR QoQ passes)
+#   both   = all four checks must pass (strict)
+FILTER_MODE = os.environ.get("FILTER_MODE", "yoy").strip().lower()
 MIN_REV_YOY = envnum("MIN_REV_YOY", 20)    # revenue growth % vs same quarter last year
 MIN_REV_QOQ = envnum("MIN_REV_QOQ", 20)    # revenue growth % vs previous quarter
 MIN_PAT_YOY = envnum("MIN_PAT_YOY", 20)    # net profit growth % vs same quarter last year
@@ -463,13 +469,26 @@ def _g(g):
     return "turnaround" if g == float("inf") else f"{g:+.0f}%"
 
 def passes_filter(sales, pat):
-    checks = [("Rev YoY", growth(sales[0], sales[2]), MIN_REV_YOY),
-              ("Rev QoQ", growth(sales[0], sales[1]), MIN_REV_QOQ),
-              ("PAT YoY", growth(pat[0], pat[2], ALLOW_TURNAROUND), MIN_PAT_YOY),
-              ("PAT QoQ", growth(pat[0], pat[1], ALLOW_TURNAROUND), MIN_PAT_QOQ)]
-    desc = ", ".join(f"{n} {_g(g)}" for n, g, _ in checks)
-    ok = all(g is not None and g >= m for _, g, m in checks)
-    return ok, desc
+    r_yoy = growth(sales[0], sales[2])
+    r_qoq = growth(sales[0], sales[1])
+    p_yoy = growth(pat[0], pat[2], ALLOW_TURNAROUND)
+    p_qoq = growth(pat[0], pat[1], ALLOW_TURNAROUND)
+
+    def ok(g, m):
+        return g is not None and g >= m
+
+    if FILTER_MODE == "both":      # all four checks must pass
+        passed = (ok(r_yoy, MIN_REV_YOY) and ok(r_qoq, MIN_REV_QOQ)
+                  and ok(p_yoy, MIN_PAT_YOY) and ok(p_qoq, MIN_PAT_QOQ))
+    elif FILTER_MODE == "either":  # revenue (YoY or QoQ) AND profit (YoY or QoQ)
+        passed = ((ok(r_yoy, MIN_REV_YOY) or ok(r_qoq, MIN_REV_QOQ))
+                  and (ok(p_yoy, MIN_PAT_YOY) or ok(p_qoq, MIN_PAT_QOQ)))
+    else:                          # "yoy": revenue YoY AND profit YoY, QoQ ignored
+        passed = ok(r_yoy, MIN_REV_YOY) and ok(p_yoy, MIN_PAT_YOY)
+
+    desc = (f"Rev YoY {_g(r_yoy)}, Rev QoQ {_g(r_qoq)}, "
+            f"PAT YoY {_g(p_yoy)}, PAT QoQ {_g(p_qoq)}")
+    return passed, desc
 
 def mark_qualified(row):
     db.execute("INSERT OR REPLACE INTO qualified VALUES (?,?,?)",
@@ -573,6 +592,8 @@ def run_once(days):
     if FILTER_ON:   # presentations/concalls only for companies whose result passed the filter
         items = [r for r in items if r["_kind"] == "result" or is_qualified(r.get("SCRIP_CD"))]
     print(f"{len(items)} filings to check; analysing up to {MAX_PER_RUN}")
+    print(f"Filter: on={FILTER_ON} mode={FILTER_MODE} "
+          f"rev>={MIN_REV_YOY:g}%/{MIN_REV_QOQ:g}% (yoy/qoq) pat>={MIN_PAT_YOY:g}%/{MIN_PAT_QOQ:g}% (yoy/qoq)")
     done = skipped = 0
     for row in items[:MAX_PER_RUN]:
         if time.time() - start > RUN_BUDGET:
