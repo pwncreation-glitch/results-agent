@@ -33,7 +33,7 @@ TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # leave empty = auto-pick a current Flash model
 WATCHLIST = [x.strip() for x in os.environ.get("WATCHLIST", "").split(",") if x.strip()]  # BSE scrip codes, empty = all
-MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "50"))  # protects free-tier limits
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "25"))  # protects free-tier limits
 SLEEP_BETWEEN = 8  # seconds between LLM calls
 MAX_CHARS = 60000  # PDF text sent to the LLM
 RUN_BUDGET = int(os.environ.get("RUN_BUDGET_SECONDS", "540"))  # stop starting new filings after this many seconds
