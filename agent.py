@@ -43,10 +43,10 @@ def envnum(name, default):
 MAX_PER_RUN = int(envnum("MAX_PER_RUN", 25))  # filings analysed per run (protects free-tier limits)
 # Quality filter: only results meeting ALL four thresholds are posted
 FILTER_ON = os.environ.get("FILTER_ON", "1").strip() != "0"           # set FILTER_ON=0 to post every result
-MIN_REV_YOY = envnum("MIN_REV_YOY", 50)    # revenue growth % vs same quarter last year
-MIN_REV_QOQ = envnum("MIN_REV_QOQ", 50)    # revenue growth % vs previous quarter
-MIN_PAT_YOY = envnum("MIN_PAT_YOY", 40)    # net profit growth % vs same quarter last year
-MIN_PAT_QOQ = envnum("MIN_PAT_QOQ", 40)    # net profit growth % vs previous quarter
+MIN_REV_YOY = envnum("MIN_REV_YOY", 20)    # revenue growth % vs same quarter last year
+MIN_REV_QOQ = envnum("MIN_REV_QOQ", 20)    # revenue growth % vs previous quarter
+MIN_PAT_YOY = envnum("MIN_PAT_YOY", 20)    # net profit growth % vs same quarter last year
+MIN_PAT_QOQ = envnum("MIN_PAT_QOQ", 20)    # net profit growth % vs previous quarter
 ALLOW_TURNAROUND = os.environ.get("ALLOW_TURNAROUND", "1").strip() != "0"  # loss -> profit counts as passing
 SLEEP_BETWEEN = 8  # seconds between LLM calls
 MAX_CHARS = 60000  # PDF text sent to the LLM
